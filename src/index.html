@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>阻抗计算</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>">
+<style>
+:root {
+    --primary: #0066cc; --border: #d0d5dd;
+    --text: #1d2939; --text-muted: #667085; --bg-card: #fff; --radius: 7px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { -webkit-text-size-adjust: 100%; scrollbar-width: none; }
+html::-webkit-scrollbar { display: none; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    background: #f0f2f5; color: var(--text); line-height: 1.5; font-size: 14px;
+}
+.page { min-height: 100vh; }
+.impedance-calculator { padding: 14px 12px 32px; max-width: 620px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+.mode-switch { display: flex; flex-wrap: wrap; gap: 6px; }
+.mode-btn, .toggle-btn, input[type="number"] { border: 1px solid var(--border); background: var(--bg-card); }
+.mode-btn, input[type="number"] { border-radius: var(--radius); }
+.mode-btn, .toggle-btn, .calculate-btn { cursor: pointer; }
+.mode-btn, .toggle-btn, .input-group label, .result-item .label { color: var(--text-muted); }
+.calculate-btn, .result-card h2, .result-item span:not(.label) { font-weight: 600; }
+.mode-btn { flex: 1; min-width: 64px; padding: 9px 4px; font-size: 13px; white-space: nowrap; }
+.mode-btn.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+.card { background: var(--bg-card); border: 1px solid #e4e7ec; border-radius: 10px; }
+.circuit-diagram { padding: 30px 8px 12px; text-align: center; position: relative; }
+.circuit-svg { width: 100%; max-width: 340px; height: auto; }
+.circuit-label { font-size: 11px; fill: #475467; font-family: sans-serif; }
+.toggle-btn { position: absolute; top: 8px; padding: 4px 11px; border-radius: 14px; font-size: 11px; user-select: none; z-index: 2; }
+.toggle-btn.right { right: 8px; }
+.toggle-btn.left { left: 8px; }
+.toggle-btn.on { background: #ecfdf3; border-color: #12b76a; color: #027a48; }
+.toggle-btn.off { background: #f9fafb; border-color: var(--border); color: #98a2b3; }
+.input-row { display: flex; gap: 10px; }
+.input-group { flex: 1; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.input-group label { font-size: 12px; }
+input[type="number"] { width: 100%; padding: 9px 11px; font-size: 14px; outline: none; }
+input[type="number"]:focus { border-color: var(--primary); }
+.input-error { border-color: #f04438 !important; background: #fef3f2 !important; }
+.calculate-btn { width: 100%; margin-top: 6px; padding: 12px; background: var(--primary); color: #fff; border: none; border-radius: 8px; font-size: 15px; letter-spacing: .5px; }
+.result-card { padding: 16px; }
+.result-card h2 { font-size: 15px; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid #eaecf0; }
+.result-item { display: flex; justify-content: space-between; align-items: baseline; padding: 7px 0; gap: 12px; }
+.result-item .label { font-size: 13px; flex-shrink: 0; }
+.result-item span:not(.label) { font-size: 16px; text-align: right; }
+#__toast {
+    position: fixed; left: 50%; bottom: 32px; transform: translateX(-50%);
+    background: rgba(17,24,39,.92); color: #fff; padding: 10px 20px;
+    border-radius: 8px; font-size: 13px; z-index: 99999; display: none;
+    pointer-events: none; max-width: 90%; text-align: center;
+}
+#__toast.__toast-show { display: block; }
+</style></head>
+<body>
+<div id="page3-3-2" class="page active"></div>
+<script>
+/* ===================== 工具函数 ===================== */
+const safeFloat = (v, fallback) => {
+    const n = parseFloat(v);
+    return (n === n && isFinite(n)) ? n : (fallback || 0);
+};
+const $ = (id) => document.getElementById(id);
+const $q = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+function num(id, fallback = 0) {
+    const el = $(id);
+    if (!el) return fallback;
+    const v = parseFloat(el.value);
+    return isNaN(v) ? fallback : v;
+}
+function setDisplay(id, show) { const e = $(id); if (e) e.style.display = show ? '' : 'none'; }
+function setText(id, txt) {
+    const e = $(id);
+    if (e) e.textContent = (typeof txt === 'number' && !Number.isFinite(txt)) ? '—' : txt;
+}
+function toast(message, duration = 3000) {
+    let t = $('__toast');
+    if (!t) { t = document.createElement('div'); t.id = '__toast'; document.body.appendChild(t); }
+    t.textContent = message;
+    t.className = '__toast-show';
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => { t.className = ''; }, duration);
+}
+function markError(id) {
+    const el = $(id);
+    if (!el) return;
+    el.classList.add('input-error');
+    if (el._clearErrorHandler) el.removeEventListener('input', el._clearErrorHandler);
+    el._clearErrorHandler = () => { el.classList.remove('input-error'); el._clearErrorHandler = null; };
+    el.addEventListener('input', el._clearErrorHandler);
+    el.focus();
+}
+
+function modeBtns(items, dataAttr = 'data-mode') {
+    return '<div class="mode-switch">' + items.map(it =>
+        `<button class="mode-btn${it.active ? ' active' : ''}" ${dataAttr}="${it.mode}">${it.label}</button>`
+    ).join('') + '</div>';
+}
+function bindModeSwitch(selector, panels, onchange) {
+    const mm = selector.match(/\[data-([^\]]+)\]/);
+    const dataKey = mm ? mm[1].replace(/-([a-z])/g, (_, c) => c.toUpperCase()) : null;
+    const btns = $q(selector);
+    const getMode = (b) => dataKey ? b.dataset[dataKey] : (b.dataset.mode || b.textContent.trim());
+    const applyPanels = (mode) => {
+        if (!panels) return;
+        Object.keys(panels).forEach((m) => {
+            const panel = $(panels[m]);
+            if (panel) panel.style.display = (mode === m) ? '' : 'none';
+        });
+    };
+    let currentMode = null;
+    const activeBtn = btns.find((b) => b.classList.contains('active'));
+    if (activeBtn) currentMode = getMode(activeBtn);
+    if (currentMode) applyPanels(currentMode);
+    btns.forEach((btn) => {
+        btn.addEventListener('click', () => {
+            const newMode = getMode(btn);
+            if (newMode === currentMode && btn.classList.contains('active')) return;
+            currentMode = newMode;
+            btns.forEach((b) => b.classList.remove('active'));
+            btn.classList.add('active');
+            applyPanels(currentMode);
+            if (onchange) onchange(currentMode);
+        });
+    });
+}
+
+/* ===================== 计算核心 ===================== */
+function calculateSingleSurfaceImpedance(W, H, Er, T, useSolderMask = false, solderMaskParams = {}) {
+    if (W <= 0 || H <= 0 || Er <= 0) return 1000;
+    const hs = solderMaskParams.thickness || 1.37795;
+    const ers = solderMaskParams.dielectric || 4.2;
+    const u = W / H, t_h = T / H;
+    const du1 = t_h > 0
+        ? (t_h / Math.PI) * Math.log(1 + 4 * Math.E / (t_h * Math.pow(1 / Math.tanh(Math.sqrt(6.517 * u)), 2)))
+        : 0;
+    const dur = 0.5 * du1 * (1 + 1 / Math.cosh(Math.sqrt(Er - 1)));
+    const u1 = u + du1, ur = u + dur;
+    const a_ur = 1 + (1 / 49) * Math.log((Math.pow(ur, 4) + Math.pow(ur / 52, 2)) / (Math.pow(ur, 4) + 0.432))
+        + (1 / 18.7) * Math.log(1 + Math.pow(ur / 18.1, 3));
+    const b_er = 0.564 * Math.pow((Er - 0.9) / (Er + 3), 0.053);
+    let ereff = (Er + 1) / 2 + (Er - 1) / 2 * Math.pow(1 + 10 / ur, -a_ur * b_er);
+    if (useSolderMask) {
+        const k = 1 / Math.sqrt(1 + 2 * hs / H);
+        ereff = ereff * k + ers * (1 - k);
+    }
+    const f_u1 = 6 + (2 * Math.PI - 6) * Math.exp(-Math.pow(30.666 / u1, 0.7528));
+    const zAir = 60 * Math.log(f_u1 / u1 + Math.sqrt(1 + Math.pow(2 / u1, 2)));
+    return safeFloat(zAir / Math.sqrt(ereff), 1000);
+}
+
+// 差分结果公共构造：zDiff = 2*z0*(1 - a*exp(-b*s))
+const FAIL_DIFF = { z0: 1000, zOdd: 1000, zEven: 1000, zDiff: 1000 };
+function diffResult(z0, a, b, s, precision = '') {
+    const zDiff = 2 * z0 * (1 - a * Math.exp(-b * s));
+    const zOdd = zDiff / 2;
+    return { z0, zOdd, zEven: z0 * z0 / zOdd, zDiff, precision };
+}
+
+function calculateDiffSurfaceImpedance(W, H, D, Er, T, useSolderMask = false, solderMaskParams = {}) {
+    if (W <= 0 || H <= 0 || D <= 0 || Er <= 0) return FAIL_DIFF;
+    const sH = D / H;
+    // 差分耦合系数参考: IPC-2141A / Bogatin经验拟合
+    return diffResult(calculateSingleSurfaceImpedance(W, H, Er, T, useSolderMask, solderMaskParams), 0.829, 1.08, sH,
+        sH < 0.3 ? ' ⚠间距过小,精度有限（经验拟合公式，高速设计建议使用2D场求解器验证）' : '');
+}
+
+// 内层带状线公共参数
+function innerStripParams(W, B, T) {
+    const t_b = Math.min(T / B, 0.95);
+    const w_b = W / B;
+    const weff_b = Math.max(0.01, w_b < 0.35 ? w_b - Math.pow(0.35 - w_b, 2) / (1 + 12 * t_b) : w_b);
+    const Cf = (2 / Math.PI) * Math.log(1 / (1 - t_b) + 1) - (t_b / Math.PI) * Math.log(1 / Math.pow(1 - t_b, 2) - 1);
+    return { t_b, weff_b, Cf };
+}
+
+function calculateSingleInnerImpedance(W, H, Er, T) {
+    if (W <= 0 || H <= 0 || Er <= 0) return 1000;
+    const { t_b, weff_b, Cf } = innerStripParams(W, H + T, T);
+    return safeFloat((30 * Math.PI / Math.sqrt(Er)) * (1 - t_b) / (weff_b + Cf), 1000);
+}
+
+function calculateSingleInnerAsymImpedance(W, H1, H2, Er, T) {
+    if (W <= 0 || H1 <= 0 || H2 <= 0 || Er <= 0) return 1000;
+    const B = H1 + H2 + T;
+    const { t_b, weff_b, Cf } = innerStripParams(W, B, T);
+    const z0Sym = (30 * Math.PI / Math.sqrt(Er)) * (1 - t_b) / (weff_b + Cf);
+    const h1_b = Math.min(H1, H2) / B;
+    return safeFloat(z0Sym * (1 - 0.765 * (Math.exp(-4.85 * h1_b) - Math.exp(-4.85 * 0.5))), 1000);
+}
+
+function calculateDiffInnerImpedance(W, H, D, Er, T) {
+    if (W <= 0 || H <= 0 || D <= 0 || Er <= 0) return FAIL_DIFF;
+    const sB = D / H;
+    return { ...diffResult(calculateSingleInnerImpedance(W, H, Er, T), 0.893, 2.93, sB), precision: sB < 0.1 ? ' ⚠间距过小,精度有限' : '' };
+}
+
+function calculateDiffInnerAsymImpedance(W, H1, H2, D, Er, T) {
+    if (W <= 0 || H1 <= 0 || H2 <= 0 || D <= 0 || Er <= 0) return FAIL_DIFF;
+    const sB = D / (H1 + H2 + T);
+    // 差分耦合系数参考: E. Bogatin, "Signal Integrity: Simplified", 第10章
+    return { ...diffResult(calculateSingleInnerAsymImpedance(W, H1, H2, Er, T), 0.619, 1.79, sB), precision: sB < 0.1 ? ' ⚠间距过小,精度有限' : '' };
+}
+
+/* 共面差分（表层）—— 基于共面波导保角映射 */
+function agm(a, b) {
+    for (let i = 0; i < 50; i++) {
+        const an = (a + b) / 2, bn = Math.sqrt(a * b);
+        if (Math.abs(an - bn) < 1e-15) return an;
+        a = an; b = bn;
+    }
+    return a;
+}
+function KoverKp(k) {
+    if (k <= 1e-12) return 0;
+    if (k >= 1 - 1e-12) return 1e12;
+    const kp = Math.sqrt(Math.max(0, 1 - k * k));
+    const r = agm(1, k) / Math.max(agm(1, kp), 1e-15);
+    return isFinite(r) ? r : (k >= 0.5 ? 1e12 : 0);
+}
+function calcCoplanarDiffZ(w, s, d, h, er, t, useSolderMask) {
+    const a = (w + (2 * t / Math.PI) * Math.log(1 + 2 * h / t)) / 2;
+    const copZ = (b) => {
+        const k1 = a / b;
+        const k2 = Math.tanh(Math.PI * a / (2 * h)) / Math.tanh(Math.PI * b / (2 * h));
+        const Kk1 = KoverKp(k1), Kk2 = KoverKp(k2);
+        const Kpk1 = 1 / Kk1;
+        let erEff = (1 + er * Kpk1 * Kk2) / (1 + Kpk1 * Kk2);
+        if (useSolderMask) erEff = erEff * 0.4 + 3.5 * 0.6;
+        return 60 * Math.PI / (Math.sqrt(erEff) * (Kk1 + Kk2));
+    };
+    const z0 = copZ(a + d);
+    const zOdd = copZ(a + s / 2);
+    return { z0, zodd: zOdd, zeven: z0, zdiff: 2 * zOdd };
+}
+
+/* ===================== 搜索与范围 ===================== */
+// 方向感知二分查找：increasing=true 表示阻抗随参数增大而增大，返回最接近目标的值
+function binarySearch(fn, target, lo, hi, { increasing = false, tolerance = 0.1, maxIter = 150 } = {}) {
+    let best = { value: lo, err: Infinity };
+    for (let i = 0; i < maxIter; i++) {
+        const mid = (lo + hi) / 2;
+        const z = fn(mid);
+        const err = Math.abs(z - target);
+        if (err < best.err) best = { value: mid, err };
+        if (err < tolerance || hi - lo < 1e-7) break;
+        if (increasing ? z > target : z < target) hi = mid; else lo = mid;
+    }
+    return best.value;
+}
+
+
+// 反算线宽时按目标阻抗选取搜索区间
+function widthRange(target) {
+    if (target > 100) return [0.5, 8];
+    if (target > 70) return [0.5, 15];
+    if (target > 40) return [1, 30];
+    return [5, 100];
+}
+
+function makeAsym(calcFn, H1, H2) {
+    const r = H1 / (H1 + H2);
+    return (w, h, d, er, t) => calcFn(w, h * r, h * (1 - r), d, er, t);
+}
+
+// 目标阻抗超出可实现范围时，生成调整建议文本
+function checkImpedanceRange(targetZ, min, max, mode = 'width', extra = null) {
+    const isTooLow = targetZ < min;
+    const hDir = isTooLow ? '以下' : '以上';
+    let suggestion;
+    if (!extra) {
+        const hints = { spacing: '可尝试调整介质厚度或走线宽度。', single: '可尝试调整介质厚度。', width: '可尝试调整介质厚度或走线间距。' };
+        suggestion = hints[mode] || '请检查输入参数是否合理。';
+    } else if (mode === 'spacing') {
+        const { calcFn, W, H, H1, H2, D = 0, Er, T, useSolderMask = false } = extra;
+        const isAsym = H1 !== undefined && H2 !== undefined;
+        const fn = isAsym ? makeAsym(calcFn, H1, H2) : calcFn;
+        const hArg = isAsym ? (H1 + H2) : H;
+        const recH = binarySearch((h) => fn(W, h, D, Er, T, useSolderMask).zDiff, targetZ, 1, 50, { increasing: true });
+        const recW = binarySearch((w) => fn(w, hArg, D, Er, T, useSolderMask).zDiff, targetZ, 0.5, 20, { increasing: false });
+        suggestion = `可尝试将介质厚度调整至 ${recH.toFixed(2)}mil ${hDir} 或将走线宽度调整至 ${recW.toFixed(2)}mil ${isTooLow ? '以上' : '以下'}。`;
+    } else if (mode === 'single') {
+        const { calcFn, H1, H2, Er, T, useSolderMask = false, W = 10 } = extra;
+        const isAsym = H1 !== undefined && H2 !== undefined;
+        const fn = isAsym ? makeAsym(calcFn, H1, H2) : calcFn;
+        const bestH = binarySearch((h) => fn(W, h, Er, T, useSolderMask), targetZ, 1, 50, { increasing: true });
+        suggestion = `可尝试将介质厚度调整至 ${bestH.toFixed(2)}mil ${hDir}。`;
+    } else if (mode === 'width') {
+        const { calcFn, H1, H2, D, Er, T, useSolderMask = false } = extra;
+        const fn = (H1 !== undefined && H2 !== undefined) ? makeAsym(calcFn, H1, H2) : calcFn;
+        const recH = binarySearch((h) => fn(6, h, D, Er, T, useSolderMask).zDiff, targetZ, 1, 50, { increasing: true });
+        suggestion = `可尝试将介质厚度调整至 ${recH.toFixed(2)}mil ${hDir} 或${isTooLow ? '减小' : '增大'}走线间距。`;
+    } else {
+        suggestion = '请检查输入参数是否合理。';
+    }
+    if (isTooLow) return `目标阻抗过低，最小可实现的阻抗为 ${min.toFixed(2)}Ω。${suggestion}`;
+    if (targetZ > max) return `目标阻抗过高，最大可实现的阻抗为 ${max.toFixed(2)}Ω。${suggestion}`;
+    return null;
+}
+
+/* ===================== 反算处理器 ===================== */
+const state = { currentMode: 'single-surface', ssSolder: true, dsSolder: true, dsCoplanar: false, siAsym: false, diAsym: false };
+const maskOf = (key) => key ? state[key] : false;
+
+// 通用反算：检查范围 + 二分查找
+function runReverse(z, target, lo, hi, increasing, check) {
+    if (check) {
+        const err = checkImpedanceRange(target, check.min, check.max, check.mode, check.extra);
+        if (err) { toast(err); return null; }
+    }
+    return binarySearch(z, target, lo, hi, { increasing });
+}
+const widthCheck = (z, mode, extra) => ({ min: z(100), max: z(0.1), mode, extra });
+const spacingCheck = (z, mode, extra) => ({ min: z(1), max: z(50), mode, extra });
+
+// 单端反算线宽（对称）
+const revSingle = (calcFn, maskKey, wInput) => (v) => {
+    const mask = maskOf(maskKey);
+    const z = (w) => calcFn(w, v.h, v.er, v.t, mask);
+    return runReverse(z, v.target, ...widthRange(v.target), false,
+        widthCheck(z, 'single', { calcFn, H: v.h, Er: v.er, T: v.t, useSolderMask: mask, W: wInput ? num(wInput) : v.w }));
+};
+// 单端反算线宽（非对称）
+const revSingleAsym = (calcFn, wInput) => (v) => {
+    const z = (w) => calcFn(w, v.h1, v.h2, v.er, v.t);
+    return runReverse(z, v.target, ...widthRange(v.target), false,
+        widthCheck(z, 'single', { calcFn, H1: v.h1, H2: v.h2, Er: v.er, T: v.t, W: wInput ? num(wInput) : v.w }));
+};
+// 差分反算线宽
+const revDiffWidth = (calcFn, maskKey) => (v) => {
+    const mask = maskOf(maskKey);
+    const z = (w) => calcFn(w, v.h, v.d, v.er, v.t, mask).zDiff;
+    return runReverse(z, v.target, ...widthRange(v.target), false,
+        widthCheck(z, 'width', { calcFn, H: v.h, D: v.d, Er: v.er, T: v.t, useSolderMask: mask }));
+};
+// 差分反算间距（阻抗随间距增大而增大）
+const revDiffSpacing = (calcFn, maskKey) => (v) => {
+    const mask = maskOf(maskKey);
+    const z = (d) => calcFn(v.w, v.h, d, v.er, v.t, mask).zDiff;
+    return runReverse(z, v.target, 1, 50, true,
+        spacingCheck(z, 'spacing', { calcFn, W: v.w, H: v.h, D: v.d, Er: v.er, T: v.t, useSolderMask: mask }));
+};
+// 差分反算线宽（非对称）
+const revDiffWidthAsym = (calcFn) => (v) => {
+    const z = (w) => calcFn(w, v.h1, v.h2, v.d, v.er, v.t).zDiff;
+    return runReverse(z, v.target, ...widthRange(v.target), false,
+        widthCheck(z, 'width', { calcFn, H1: v.h1, H2: v.h2, D: v.d, Er: v.er, T: v.t }));
+};
+// 差分反算间距（非对称）
+const revDiffSpacingAsym = (calcFn) => (v) => {
+    const z = (d) => calcFn(v.w, v.h1, v.h2, d, v.er, v.t).zDiff;
+    return runReverse(z, v.target, 1, 50, true,
+        spacingCheck(z, 'spacing', { calcFn, W: v.w, H1: v.h1, H2: v.h2, D: v.d, Er: v.er, T: v.t }));
+};
+// 共面反算线宽
+const revCoplanarWidth = (maskKey) => (v) => {
+    const mask = maskOf(maskKey);
+    const z = (w) => calcCoplanarDiffZ(w, v.s, v.d, v.h, v.er, v.t, mask).zdiff;
+    return runReverse(z, v.target, ...widthRange(v.target), false, widthCheck(z, 'width'));
+};
+// 共面反算间距
+const revCoplanarSpacing = (maskKey) => (v) => {
+    const z = (s) => calcCoplanarDiffZ(v.w, s, v.d, v.h, v.er, v.t, maskOf(maskKey)).zdiff;
+    return runReverse(z, v.target, 0.5, 50, true);
+};
+
+/* ===================== 电路图 SVG ===================== */
+const SVG_SS = `<svg class="circuit-svg" viewBox="0 0 300 150">
+<rect x="50" y="80" width="200" height="50" fill="#90EE90" stroke="#333" stroke-width="1" opacity="0.5"/>
+<rect x="50" y="120" width="200" height="10" fill="#8B4513" stroke="#333" stroke-width="1"/>
+<rect x="120" y="70" width="60" height="10" fill="#FFD700" stroke="#333" stroke-width="1"/>
+<text x="130" y="64" class="circuit-label">W</text>
+<text x="148" y="64" class="circuit-label" id="ss-w-value" style="font-size: 10px; fill: #0066cc;">6mil</text>
+<text x="30" y="125" text-anchor="middle" class="circuit-label">GND</text>
+<line x1="150" y1="80" x2="150" y2="110" stroke="#333" stroke-width="1" stroke-dasharray="5,3"/>
+<text x="175" y="95" class="circuit-label">H</text>
+<text x="188" y="95" class="circuit-label" id="ss-h-value" style="font-size: 10px; fill: #0066cc;">4mil</text>
+</svg>`;
+
+const SVG_DS_STD = `<svg class="circuit-svg" viewBox="0 0 300 150" id="ds-standard-svg">
+<rect x="50" y="80" width="200" height="50" fill="#90EE90" stroke="#333" stroke-width="1" opacity="0.5"/>
+<rect x="50" y="120" width="200" height="10" fill="#8B4513" stroke="#333" stroke-width="1"/>
+<rect x="90" y="70" width="40" height="10" fill="#FFD700" stroke="#333" stroke-width="1"/>
+<rect x="170" y="70" width="40" height="10" fill="#FFD700" stroke="#333" stroke-width="1"/>
+<text x="84" y="64" class="circuit-label">W1</text>
+<text x="109" y="64" class="circuit-label" id="ds-w1-value" style="font-size: 10px; fill: #0066cc;">6mil</text>
+<text x="170" y="64" class="circuit-label">W2</text>
+<text x="198" y="64" class="circuit-label" id="ds-w2-value" style="font-size: 10px; fill: #0066cc;">6mil</text>
+<text x="30" y="125" text-anchor="middle" class="circuit-label">GND</text>
+<line x1="150" y1="80" x2="150" y2="110" stroke="#333" stroke-width="1" stroke-dasharray="5,3"/>
+<text x="175" y="95" class="circuit-label">H</text>
+<text x="188" y="95" class="circuit-label" id="ds-h-value" style="font-size: 10px; fill: #0066cc;">4mil</text>
+<line x1="130" y1="75" x2="170" y2="75" stroke="#333" stroke-width="1" stroke-dasharray="5,3"/>
+<text x="135" y="72" class="circuit-label">D</text>
+<text x="148" y="72" class="circuit-label" id="ds-d-value" style="font-size: 10px; fill: #0066cc;">8mil</text>
+</svg>`;
+
+const SVG_DS_COP = `<svg class="circuit-svg" viewBox="0 0 320 160" id="ds-coplanar-svg" style="display:none">
+<rect x="40" y="90" width="240" height="45" fill="#90EE90" stroke="#333" stroke-width="1" opacity="0.5"/>
+<rect x="40" y="125" width="240" height="10" fill="#8B4513" stroke="#333" stroke-width="1"/>
+<rect x="40" y="78" width="40" height="10" fill="#C0C0C0" stroke="#333" stroke-width="1"/>
+<rect x="100" y="78" width="50" height="10" fill="#FFD700" stroke="#333" stroke-width="1"/>
+<rect x="170" y="78" width="50" height="10" fill="#FFD700" stroke="#333" stroke-width="1"/>
+<rect x="240" y="78" width="40" height="10" fill="#C0C0C0" stroke="#333" stroke-width="1"/>
+<text x="55" y="72" class="circuit-label" style="font-size:9px">GND</text>
+<text x="120" y="72" class="circuit-label">D+</text>
+<text x="190" y="72" class="circuit-label">D-</text>
+<text x="255" y="72" class="circuit-label" style="font-size:9px">GND</text>
+<line x1="80" y1="83" x2="100" y2="83" stroke="#e74c3c" stroke-width="1.5" stroke-dasharray="4,2"/>
+<text x="82" y="76" class="circuit-label" style="font-size:8px;fill:#e74c3c">D1</text>
+<line x1="150" y1="83" x2="170" y2="83" stroke="#e74c3c" stroke-width="1.5" stroke-dasharray="4,2"/>
+<text x="155" y="76" class="circuit-label" style="font-size:8px;fill:#e74c3c">S</text>
+<line x1="220" y1="83" x2="240" y2="83" stroke="#e74c3c" stroke-width="1.5" stroke-dasharray="4,2"/>
+<text x="222" y="76" class="circuit-label" style="font-size:8px;fill:#e74c3c">D2</text>
+<line x1="285" y1="88" x2="285" y2="125" stroke="#0066cc" stroke-width="1" stroke-dasharray="4,2"/>
+<polygon points="285,88 282,93 288,93" fill="#0066cc"/>
+<polygon points="285,125 282,120 288,120" fill="#0066cc"/>
+<text x="290" y="110" class="circuit-label" style="font-size:10px;fill:#0066cc">H</text>
+<text x="30" y="130" text-anchor="middle" class="circuit-label">GND</text>
+</svg>`;
+
+const SVG_SI = `<svg class="circuit-svg" viewBox="0 0 300 150" id="si-standard-svg">
+<rect x="50" y="10" width="200" height="130" fill="#90EE90" stroke="#333" stroke-width="1" opacity="0.5"/>
+<rect x="50" y="10" width="200" height="10" fill="#8B4513" stroke="#333" stroke-width="1"/>
+<rect x="50" y="130" width="200" height="10" fill="#8B4513" stroke="#333" stroke-width="1"/>
+<rect x="120" y="70" width="60" height="10" fill="#FFD700" stroke="#333" stroke-width="1"/>
+<circle cx="150" cy="75" r="3" fill="#FF0000"/>
+<text x="130" y="64" class="circuit-label">W</text>
+<text x="148" y="64" class="circuit-label" id="si-w-value" style="font-size: 10px; fill: #0066cc;">6mil</text>
+<text x="30" y="18" text-anchor="middle" class="circuit-label">GND</text>
+<text x="30" y="138" text-anchor="middle" class="circuit-label">GND</text>
+<line x1="188" y1="20" x2="188" y2="130" stroke="#333" stroke-width="1" stroke-dasharray="5,3"/>
+<text x="200" y="75" class="circuit-label">H</text>
+<text x="213" y="75" class="circuit-label" id="si-h-value" style="font-size: 10px; fill: #0066cc;">16mil</text>
+<text x="150" y="95" text-anchor="middle" class="circuit-label" style="font-size: 10px; fill: #666;">(对称)</text>
+</svg>`;
+
+const SVG_DI = `<svg class="circuit-svg" viewBox="0 0 300 150" id="di-standard-svg">
+<rect x="50" y="10" width="200" height="130" fill="#90EE90" stroke="#333" stroke-width="1" opacity="0.5"/>
+<rect x="50" y="10" width="200" height="10" fill="#8B4513" stroke="#333" stroke-width="1"/>
+<rect x="50" y="130" width="200" height="10" fill="#8B4513" stroke="#333" stroke-width="1"/>
+<rect x="90" y="70" width="40" height="10" fill="#FFD700" stroke="#333" stroke-width="1"/>
+<rect x="170" y="70" width="40" height="10" fill="#FFD700" stroke="#333" stroke-width="1"/>
+<circle cx="110" cy="75" r="3" fill="#FF0000"/>
+<circle cx="190" cy="75" r="3" fill="#FF0000"/>
+<text x="84" y="64" class="circuit-label">W1</text>
+<text x="109" y="64" class="circuit-label" id="di-w1-value" style="font-size: 10px; fill: #0066cc;">3.7mil</text>
+<text x="170" y="64" class="circuit-label">W2</text>
+<text x="198" y="64" class="circuit-label" id="di-w2-value" style="font-size: 10px; fill: #0066cc;">3.7mil</text>
+<text x="30" y="18" text-anchor="middle" class="circuit-label">GND</text>
+<text x="30" y="138" text-anchor="middle" class="circuit-label">GND</text>
+<line x1="224" y1="20" x2="224" y2="130" stroke="#333" stroke-width="1" stroke-dasharray="5,3"/>
+<text x="240" y="75" class="circuit-label">H</text>
+<text x="253" y="75" class="circuit-label" id="di-h-value" style="font-size: 10px; fill: #0066cc;">8mil</text>
+<line x1="130" y1="75" x2="170" y2="75" stroke="#333" stroke-width="1" stroke-dasharray="5,3"/>
+<text x="135" y="72" class="circuit-label">D</text>
+<text x="148" y="72" class="circuit-label" id="di-d-value" style="font-size: 10px; fill: #0066cc;">7mil</text>
+<text x="150" y="95" text-anchor="middle" class="circuit-label" style="font-size: 10px; fill: #666;">(对称)</text>
+</svg>`;
+
+const SVG_SIA = `<svg class="circuit-svg" viewBox="0 0 300 150" id="si-asym-svg" style="display:none">
+<rect x="50" y="10" width="200" height="130" fill="#90EE90" stroke="#333" stroke-width="1" opacity="0.5"/>
+<rect x="50" y="10" width="200" height="10" fill="#8B4513" stroke="#333" stroke-width="1"/>
+<rect x="50" y="130" width="200" height="10" fill="#8B4513" stroke="#333" stroke-width="1"/>
+<rect x="120" y="55" width="60" height="10" fill="#FFD700" stroke="#333" stroke-width="1"/>
+<circle cx="150" cy="60" r="3" fill="#FF0000"/>
+<text x="130" y="49" class="circuit-label">W</text>
+<text x="148" y="49" class="circuit-label" id="sia-w-value" style="font-size: 10px; fill: #0066cc;">6mil</text>
+<text x="30" y="18" text-anchor="middle" class="circuit-label">GND</text>
+<text x="30" y="138" text-anchor="middle" class="circuit-label">GND</text>
+<line x1="150" y1="20" x2="150" y2="50" stroke="#333" stroke-width="1" stroke-dasharray="5,3"/>
+<line x1="150" y1="70" x2="150" y2="125" stroke="#333" stroke-width="1" stroke-dasharray="5,3"/>
+<text x="155" y="38" class="circuit-label">H1</text>
+<text x="182" y="34" class="circuit-label" id="sia-h1-value" style="font-size: 10px; fill: #0066cc;">6mil</text>
+<text x="155" y="97" class="circuit-label">H2</text>
+<text x="182" y="93" class="circuit-label" id="sia-h2-value" style="font-size: 10px; fill: #0066cc;">8mil</text>
+<text x="150" y="118" text-anchor="middle" class="circuit-label" style="font-size: 10px; fill: #666;">绝缘介质非对称结构</text>
+</svg>`;
+
+const SVG_DIA = `<svg class="circuit-svg" viewBox="0 0 300 150" id="di-asym-svg" style="display:none">
+<rect x="50" y="10" width="200" height="130" fill="#90EE90" stroke="#333" stroke-width="1" opacity="0.5"/>
+<rect x="50" y="10" width="200" height="10" fill="#8B4513" stroke="#333" stroke-width="1"/>
+<rect x="50" y="130" width="200" height="10" fill="#8B4513" stroke="#333" stroke-width="1"/>
+<rect x="90" y="55" width="40" height="10" fill="#FFD700" stroke="#333" stroke-width="1"/>
+<rect x="170" y="55" width="40" height="10" fill="#FFD700" stroke="#333" stroke-width="1"/>
+<circle cx="110" cy="60" r="3" fill="#FF0000"/>
+<circle cx="190" cy="60" r="3" fill="#FF0000"/>
+<text x="84" y="49" class="circuit-label">W1</text>
+<text x="109" y="49" class="circuit-label" id="dia-w1-value" style="font-size: 10px; fill: #0066cc;">10mil</text>
+<text x="170" y="49" class="circuit-label">W2</text>
+<text x="198" y="49" class="circuit-label" id="dia-w2-value" style="font-size: 10px; fill: #0066cc;">10mil</text>
+<text x="30" y="18" text-anchor="middle" class="circuit-label">GND</text>
+<text x="30" y="138" text-anchor="middle" class="circuit-label">GND</text>
+<line x1="150" y1="20" x2="150" y2="50" stroke="#333" stroke-width="1" stroke-dasharray="5,3"/>
+<line x1="150" y1="70" x2="150" y2="125" stroke="#333" stroke-width="1" stroke-dasharray="5,3"/>
+<line x1="130" y1="60" x2="170" y2="60" stroke="#333" stroke-width="1" stroke-dasharray="5,3"/>
+<text x="155" y="38" class="circuit-label">H1</text>
+<text x="182" y="34" class="circuit-label" id="dia-h1-value" style="font-size: 10px; fill: #0066cc;">4mil</text>
+<text x="155" y="97" class="circuit-label">H2</text>
+<text x="182" y="93" class="circuit-label" id="dia-h2-value" style="font-size: 10px; fill: #0066cc;">6mil</text>
+<text x="135" y="57" class="circuit-label">D</text>
+<text x="148" y="57" class="circuit-label" id="dia-d-value" style="font-size: 10px; fill: #0066cc;">8mil</text>
+<text x="150" y="118" text-anchor="middle" class="circuit-label" style="font-size: 10px; fill: #666;">绝缘介质非对称结构</text>
+</svg>`;
+
+/* ===================== 面板配置（数据驱动） ===================== */
+const PANELS = {
+    'single-surface': {
+        key: 'single-surface', id: 'ss', label: '表层单线', svg: SVG_SS, solderMask: true,
+        forward: {
+            inputs: [
+                ['ss-w', 'w', '走线宽度 W (mil)', 6],
+                ['ss-h', 'h', '介质厚度 H (mil)', 4],
+                ['ss-er', 'er', '介电常数 εr', 4.2],
+                ['ss-t', 't', '铜厚 T (mil)', 1.4],
+            ],
+            calc: (v) => calculateSingleSurfaceImpedance(v.w, v.h, v.er, v.t, state.ssSolder),
+            results: [['ss-z0', '特性阻抗 Z0', (r) => r.toFixed(2) + ' Ω']],
+        },
+        reverse: {
+            inputs: [
+                ['ss-z0-target', 'target', '目标阻抗 Z0 (Ω)', 50],
+                ['ss-h-rev', 'h', '介质厚度 H (mil)', 4],
+                ['ss-er-rev', 'er', '介电常数 εr', 4.2],
+                ['ss-t-rev', 't', '铜厚 T (mil)', 1.4],
+            ],
+            calc: revSingle(calculateSingleSurfaceImpedance, 'ssSolder', 'ss-w'),
+            button: '计算走线宽度',
+            result: ['ss-w-result', '走线宽度 W'],
+        },
+    },
+    'diff-surface': {
+        key: 'diff-surface', id: 'ds', label: '表层差分', svg: SVG_DS_STD, solderMask: true,
+        coplanar: {
+            key: 'diff-surface', id: 'dsc', label: '共面差分', svg: SVG_DS_COP,
+            forward: {
+                inputs: [
+                    ['dsc-w', 'w', '走线宽度 W (mil)', 5],
+                    ['dsc-s', 's', '线间距 S (mil)', 6],
+                    ['dsc-d', 'd', '距地间距 D (mil)', 8],
+                    ['dsc-h', 'h', '介质厚度 H (mil)', 4],
+                    ['dsc-er', 'er', '介电常数 εr', 4.2],
+                    ['dsc-t', 't', '铜厚 T (mil)', 1.4],
+                ],
+                calc: (v) => calcCoplanarDiffZ(v.w, v.s, v.d, v.h, v.er, v.t, state.dsSolder),
+                results: [
+                    ['dsc-zdiff', '差分阻抗', (r) => r.zdiff.toFixed(2) + ' Ω'],
+                    ['dsc-z0', '特性阻抗 Z0', (r) => r.z0.toFixed(2) + ' Ω'],
+                    ['dsc-zoo', '奇模阻抗 Zoo', (r) => r.zodd.toFixed(2) + ' Ω'],
+                    ['dsc-zoe', '偶模阻抗 Zoe', (r) => r.zeven.toFixed(2) + ' Ω'],
+                ],
+            },
+            reverse: [
+                {
+                    key: 'w', label: '反算线宽', button: '计算走线宽度',
+                    inputs: [
+                        ['dsc-zdiff-target', 'target', '目标差分阻抗 (Ω)', 100],
+                        ['dsc-h-rev', 'h', '介质厚度 H (mil)', 4],
+                        ['dsc-s-rev', 's', '线间距 S (mil)', 6],
+                        ['dsc-d-rev', 'd', '距地间距 D (mil)', 8],
+                        ['dsc-er-rev', 'er', '介电常数 εr', 4.2],
+                        ['dsc-t-rev', 't', '铜厚 T (mil)', 1.4],
+                    ],
+                    calc: revCoplanarWidth('dsSolder'),
+                    result: ['dsc-w-result', '走线宽度 W'],
+                },
+                {
+                    key: 'd', label: '反算间距', button: '计算线间距',
+                    inputs: [
+                        ['dsc-zdiff-target-d', 'target', '目标差分阻抗 (Ω)', 100],
+                        ['dsc-h-rev-d', 'h', '介质厚度 H (mil)', 4],
+                        ['dsc-w-rev-d', 'w', '走线宽度 W (mil)', 5],
+                        ['dsc-d-rev-d', 'd', '距地间距 D (mil)', 8],
+                        ['dsc-er-rev-d', 'er', '介电常数 εr', 4.2],
+                        ['dsc-t-rev-d', 't', '铜厚 T (mil)', 1.4],
+                    ],
+                    calc: revCoplanarSpacing('dsSolder'),
+                    result: ['dsc-s-result', '线间距 S'],
+                },
+            ],
+        },
+        forward: {
+            inputs: [
+                ['ds-w', 'w', '走线宽度 W (mil)', 6],
+                ['ds-h', 'h', '介质厚度 H (mil)', 4],
+                ['ds-d', 'd', '走线间距 D (mil)', 10],
+                ['ds-er', 'er', '介电常数 εr', 4.2],
+                ['ds-t', 't', '铜厚 T (mil)', 1.4],
+            ],
+            calc: (v) => calculateDiffSurfaceImpedance(v.w, v.h, v.d, v.er, v.t, state.dsSolder),
+            results: [
+                ['ds-zdiff', '差分阻抗', (r) => r.zDiff.toFixed(2) + ' Ω' + (r.precision || '')],
+                ['ds-z0', '特性阻抗 Z0', (r) => r.z0.toFixed(2) + ' Ω'],
+                ['ds-zoo', '奇模阻抗 Zoo', (r) => r.zOdd.toFixed(2) + ' Ω'],
+                ['ds-zoe', '偶模阻抗 Zoe', (r) => r.zEven.toFixed(2) + ' Ω'],
+            ],
+        },
+        reverse: [
+            {
+                key: 'w', label: '反算线宽', button: '计算走线宽度',
+                inputs: [
+                    ['ds-zdiff-target', 'target', '目标差分阻抗 (Ω)', 100],
+                    ['ds-h-rev', 'h', '介质厚度 H (mil)', 4],
+                    ['ds-d-rev', 'd', '走线间距 D (mil)', 10],
+                    ['ds-er-rev', 'er', '介电常数 εr', 4.2],
+                    ['ds-t-rev', 't', '铜厚 T (mil)', 1.4],
+                ],
+                calc: revDiffWidth(calculateDiffSurfaceImpedance, 'dsSolder'),
+                result: ['ds-w-result', '走线宽度 W'],
+            },
+            {
+                key: 'd', label: '反算间距', button: '计算走线间距',
+                inputs: [
+                    ['ds-zdiff-target-d', 'target', '目标差分阻抗 (Ω)', 100],
+                    ['ds-h-rev-d', 'h', '介质厚度 H (mil)', 4],
+                    ['ds-w-rev-d', 'w', '走线宽度 W (mil)', 6],
+                    ['ds-er-rev-d', 'er', '介电常数 εr', 4.2],
+                    ['ds-t-rev-d', 't', '铜厚 T (mil)', 1.4],
+                ],
+                calc: revDiffSpacing(calculateDiffSurfaceImpedance, 'dsSolder'),
+                result: ['ds-d-result', '走线间距 D'],
+            },
+        ],
+    },
+    'single-inner': {
+        key: 'single-inner', id: 'si', label: '内层单线', svg: SVG_SI,
+        asym: {
+            key: 'single-inner', id: 'sia', svg: SVG_SIA,
+            forward: {
+                inputs: [
+                    ['sia-w', 'w', '走线宽度 W (mil)', 6],
+                    ['sia-h1', 'h1', '上层介质 H1 (mil)', 6],
+                    ['sia-h2', 'h2', '下层介质 H2 (mil)', 8],
+                    ['sia-er', 'er', '介电常数 εr', 4.2],
+                    ['sia-t', 't', '铜厚 T (mil)', 1.4],
+                ],
+                calc: (v) => calculateSingleInnerAsymImpedance(v.w, v.h1, v.h2, v.er, v.t),
+                results: [['sia-z0', '特性阻抗 Z0', (r) => r.toFixed(2) + ' Ω']],
+            },
+            reverse: {
+                inputs: [
+                    ['sia-z0-target', 'target', '目标阻抗 Z0 (Ω)', 50],
+                    ['sia-h1-rev', 'h1', '上层介质 H1 (mil)', 4],
+                    ['sia-h2-rev', 'h2', '下层介质 H2 (mil)', 6],
+                    ['sia-er-rev', 'er', '介电常数 εr', 4.2],
+                    ['sia-t-rev', 't', '铜厚 T (mil)', 1.4],
+                ],
+                calc: revSingleAsym(calculateSingleInnerAsymImpedance, 'sia-w'),
+                button: '计算走线宽度',
+                result: ['sia-w-result', '走线宽度 W'],
+            },
+        },
+        forward: {
+            inputs: [
+                ['si-w', 'w', '走线宽度 W (mil)', 6],
+                ['si-h', 'h', '介质厚度 H1+H2 (mil)', 16],
+                ['si-er', 'er', '介电常数 εr', 4.2],
+                ['si-t', 't', '铜厚 T (mil)', 1.4],
+            ],
+            calc: (v) => calculateSingleInnerImpedance(v.w, v.h, v.er, v.t),
+            results: [['si-z0', '特性阻抗 Z0', (r) => r.toFixed(2) + ' Ω']],
+        },
+        reverse: {
+            inputs: [
+                ['si-z0-target', 'target', '目标阻抗 Z0 (Ω)', 50],
+                ['si-h-rev', 'h', '介质厚度 H1+H2 (mil)', 16],
+                ['si-er-rev', 'er', '介电常数 εr', 4.2],
+                ['si-t-rev', 't', '铜厚 T (mil)', 1.4],
+            ],
+            calc: revSingle(calculateSingleInnerImpedance, null, 'si-w'),
+            button: '计算走线宽度',
+            result: ['si-w-result', '走线宽度 W'],
+        },
+    },
+    'diff-inner': {
+        key: 'diff-inner', id: 'di', label: '内层差分', svg: SVG_DI,
+        asym: {
+            key: 'diff-inner', id: 'dia', svg: SVG_DIA,
+            forward: {
+                inputs: [
+                    ['dia-w', 'w', '走线宽度 W (mil)', 3.5],
+                    ['dia-h1', 'h1', '上层介质 H1 (mil)', 4],
+                    ['dia-h2', 'h2', '下层介质 H2 (mil)', 6],
+                    ['dia-d', 'd', '走线间距 D (mil)', 10],
+                    ['dia-er', 'er', '介电常数 εr', 4.2],
+                    ['dia-t', 't', '铜厚 T (mil)', 1.4],
+                ],
+                calc: (v) => calculateDiffInnerAsymImpedance(v.w, v.h1, v.h2, v.d, v.er, v.t),
+                results: [
+                    ['dia-zdiff', '差分阻抗', (r) => r.zDiff.toFixed(2) + ' Ω' + (r.precision || '')],
+                    ['dia-z0', '特性阻抗 Z0', (r) => r.z0.toFixed(2) + ' Ω'],
+                    ['dia-zoo', '奇模阻抗 Zoo', (r) => r.zOdd.toFixed(2) + ' Ω'],
+                    ['dia-zoe', '偶模阻抗 Zoe', (r) => r.zEven.toFixed(2) + ' Ω'],
+                ],
+            },
+            reverse: [
+                {
+                    key: 'w', label: '反算线宽', button: '计算走线宽度',
+                    inputs: [
+                        ['dia-zdiff-target', 'target', '目标差分阻抗 (Ω)', 100],
+                        ['dia-h1-rev', 'h1', '上层介质 H1 (mil)', 4],
+                        ['dia-h2-rev', 'h2', '下层介质 H2 (mil)', 6],
+                        ['dia-d-rev', 'd', '走线间距 D (mil)', 10],
+                        ['dia-er-rev', 'er', '介电常数 εr', 4.2],
+                        ['dia-t-rev', 't', '铜厚 T (mil)', 1.4],
+                    ],
+                    calc: revDiffWidthAsym(calculateDiffInnerAsymImpedance),
+                    result: ['dia-w-result', '走线宽度 W'],
+                },
+                {
+                    key: 'd', label: '反算间距', button: '计算走线间距',
+                    inputs: [
+                        ['dia-zdiff-target-d', 'target', '目标差分阻抗 (Ω)', 100],
+                        ['dia-h1-rev-d', 'h1', '上层介质 H1 (mil)', 4],
+                        ['dia-h2-rev-d', 'h2', '下层介质 H2 (mil)', 6],
+                        ['dia-w-rev-d', 'w', '走线宽度 W (mil)', 3.5],
+                        ['dia-er-rev-d', 'er', '介电常数 εr', 4.2],
+                        ['dia-t-rev-d', 't', '铜厚 T (mil)', 1.4],
+                    ],
+                    calc: revDiffSpacingAsym(calculateDiffInnerAsymImpedance),
+                    result: ['dia-d-result', '走线间距 D'],
+                },
+            ],
+        },
+        forward: {
+            inputs: [
+                ['di-w', 'w', '走线宽度 W (mil)', 3.7],
+                ['di-h', 'h', '介质厚度 H1+H2 (mil)', 8],
+                ['di-d', 'd', '走线间距 D (mil)', 7],
+                ['di-er', 'er', '介电常数 εr', 4.2],
+                ['di-t', 't', '铜厚 T (mil)', 1.4],
+            ],
+            calc: (v) => calculateDiffInnerImpedance(v.w, v.h, v.d, v.er, v.t),
+            results: [
+                ['di-zdiff', '差分阻抗', (r) => r.zDiff.toFixed(2) + ' Ω' + (r.precision || '')],
+                ['di-z0', '特性阻抗 Z0', (r) => r.z0.toFixed(2) + ' Ω'],
+                ['di-zoo', '奇模阻抗 Zoo', (r) => r.zOdd.toFixed(2) + ' Ω'],
+                ['di-zoe', '偶模阻抗 Zoe', (r) => r.zEven.toFixed(2) + ' Ω'],
+            ],
+        },
+        reverse: [
+            {
+                key: 'w', label: '反算线宽', button: '计算走线宽度',
+                inputs: [
+                    ['di-zdiff-target', 'target', '目标差分阻抗 (Ω)', 100],
+                    ['di-h-rev', 'h', '介质厚度 H1+H2 (mil)', 16],
+                    ['di-d-rev', 'd', '走线间距 D (mil)', 7],
+                    ['di-er-rev', 'er', '介电常数 εr', 4.2],
+                    ['di-t-rev', 't', '铜厚 T (mil)', 1.4],
+                ],
+                calc: revDiffWidth(calculateDiffInnerImpedance, null),
+                result: ['di-w-result', '走线宽度 W'],
+            },
+            {
+                key: 'd', label: '反算间距', button: '计算走线间距',
+                inputs: [
+                    ['di-zdiff-target-d', 'target', '目标差分阻抗 (Ω)', 100],
+                    ['di-h-rev-d', 'h', '介质厚度 H1+H2 (mil)', 16],
+                    ['di-w-rev-d', 'w', '走线宽度 W (mil)', 5],
+                    ['di-er-rev-d', 'er', '介电常数 εr', 4.2],
+                    ['di-t-rev-d', 't', '铜厚 T (mil)', 1.4],
+                ],
+                calc: revDiffSpacing(calculateDiffInnerImpedance, null),
+                result: ['di-d-result', '走线间距 D'],
+            },
+        ],
+    },
+};
+
+/* ===================== HTML 渲染 ===================== */
+function inputGroup([id, , label, value]) {
+    return `<div class="input-group"><label for="${id}">${label}</label><input type="number" id="${id}" placeholder="输入数值" value="${value}"></div>`;
+}
+function rows(inputs) {
+    let out = '';
+    for (let i = 0; i < inputs.length; i += 2) {
+        out += '<div class="input-row">' + inputs.slice(i, i + 2).map(inputGroup).join('') + '</div>';
+    }
+    return out;
+}
+function resultCard(id, results) {
+    return `<div class="card result-card" id="${id}" style="display:none"><h2>计算结果</h2>` +
+        results.map(([rid, label]) => `<div class="result-item"><span class="label">${label}:</span><span id="${rid}">--</span></div>`).join('') +
+        '</div>';
+}
+// 通用计算块：输入行 + 计算按钮 + 结果卡片（正算/反算共用，prefix 仅用于结果卡 id）
+function renderBlock(prefix, inputs, btnId, btnText, results) {
+    return `${rows(inputs)}<button class="calculate-btn" id="${btnId}">${btnText}</button>${resultCard(prefix + '-result-card', results)}`;
+}
+function renderReverse(p) {
+    const r = p.reverse;
+    return `<div id="${p.id}-reverse-panel" style="display:none">${renderBlock(p.id + '-rev', r.inputs, 'calculate-' + p.id + '-rev', r.button, [[r.result[0], r.result[1]]])}</div>`;
+}
+function renderReverseDiff(p) {
+    const list = p.reverse;
+    return `<div id="${p.id}-reverse-panel" style="display:none;padding-top:6px">` +
+        modeBtns(list.map((r, i) => ({ mode: r.key, label: r.label, active: i === 0 })), `data-${p.id}-rev-mode`) +
+        list.map((r, i) => `<div id="${p.id}-rev-${r.key}"${i === 0 ? '' : ' style="display:none"'}>${renderBlock(`${p.id}-rev-${r.key}`, r.inputs, `calculate-${p.id}-rev-${r.key}`, r.button, [[r.result[0], r.result[1]]])}</div>`).join('') +
+        '</div>';
+}
+function panelContent(p) {
+    const fwd = `<div id="${p.id}-forward-panel">${renderBlock(p.id, p.forward.inputs, 'calculate-' + p.id, '计算阻抗', p.forward.results)}</div>`;
+    const rev = Array.isArray(p.reverse) ? renderReverseDiff(p) : renderReverse(p);
+    return modeBtns([{ mode: 'forward', label: '正算', active: true }, { mode: 'reverse', label: '反算' }], `data-${p.id}-mode`) + fwd + rev;
+}
+function renderPanel(p) {
+    const alt = p.coplanar || p.asym;
+    const altKey = p.coplanar ? 'coplanar' : (p.asym ? 'asym' : null);
+    const altLabel = p.coplanar ? '标准' : '对称';
+    const toggles = (p.solderMask ? `<button class="toggle-btn right on" id="${p.id}-solder-toggle" data-panel="${p.key}">包含阻焊</button>` : '') +
+        (alt ? `<button class="toggle-btn left off" id="${p.id}-${altKey}-toggle" data-panel="${p.key}">${altLabel}</button>` : '');
+    let html = `<div id="${p.key}-panel" style="display:none"><div class="card circuit-diagram">${toggles}${p.svg}${alt ? alt.svg : ''}</div>`;
+    if (alt) {
+        html += `<div id="${p.id}-standard-inputs">${panelContent(p)}</div><div id="${p.id}-${altKey}-inputs" style="display:none">${panelContent(alt)}</div>`;
+    } else {
+        html += panelContent(p);
+    }
+    return html + '</div>';
+}
+function getImpedanceCalculatorHtml() {
+    return `<div class="impedance-calculator">` +
+        modeBtns([
+            { mode: 'single-surface', label: '表层单线', active: true },
+            { mode: 'diff-surface', label: '表层差分' },
+            { mode: 'single-inner', label: '内层单线' },
+            { mode: 'diff-inner', label: '内层差分' }
+        ]) +
+
+        Object.keys(PANELS).map((k) => renderPanel(PANELS[k])).join('') +
+        '</div>';
+}
+
+/* ===================== 初始化 ===================== */
+function validateInputs(list) {
+    for (const [id] of list) {
+        const v = num(id);
+        if (isNaN(v) || !isFinite(v)) { markError(id); toast('请输入有效的数值'); return false; }
+        if (v <= 0) { markError(id); toast('请输入大于0的数值'); return false; }
+    }
+    return true;
+}
+function readInputs(list) {
+    const v = {};
+    list.forEach(([id, key]) => { v[key] = num(id); });
+    return v;
+}
+function click(id) { const b = $(id); if (b) b.click(); }
+function createToggle(id, stateKey, onChange) {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener('click', () => {
+        const on = state[stateKey] = !state[stateKey];
+        el.classList.toggle('on', on);
+        el.classList.toggle('off', !on);
+        el.textContent = on ? '包含阻焊' : '不含阻焊';
+        if (onChange) onChange(on);
+    });
+}
+function liveSvg(inputId, valueIds) {
+    const input = $(inputId);
+    if (!input) return;
+    const els = (Array.isArray(valueIds) ? valueIds : [valueIds]).map($).filter(Boolean);
+    if (!els.length) return;
+    input.addEventListener('input', () => {
+        const v = input.value;
+        const txt = (v && !isNaN(v) && Number(v) > 0) ? v + 'mil' : '--';
+        els.forEach((el) => { el.textContent = txt; });
+    });
+}
+function setResults(results, cardId) {
+    Object.keys(results).forEach((id) => setText(id, results[id]));
+    if (cardId) setDisplay(cardId, true);
+}
+
+function bindPanel(p) {
+    const isDiff = Array.isArray(p.reverse);
+    $('calculate-' + p.id).addEventListener('click', () => {
+        if (!validateInputs(p.forward.inputs)) return;
+        const r = p.forward.calc(readInputs(p.forward.inputs));
+        const results = {};
+        p.forward.results.forEach(([rid, , fmt]) => { results[rid] = fmt(r); });
+        setResults(results, p.id + '-result-card');
+    });
+    bindModeSwitch(`[data-${p.id}-mode]`, { forward: p.id + '-forward-panel', reverse: p.id + '-reverse-panel' });
+    const list = isDiff ? p.reverse : [p.reverse];
+    if (isDiff) {
+        const panels = {};
+        list.forEach((r) => { panels[r.key] = p.id + '-rev-' + r.key; });
+        bindModeSwitch(`[data-${p.id}-rev-mode]`, panels);
+    }
+    list.forEach((r) => {
+        const suffix = isDiff ? '-' + r.key : '';
+        $(`calculate-${p.id}-rev${suffix}`).addEventListener('click', () => {
+            if (!validateInputs(r.inputs)) return;
+            const val = r.calc(readInputs(r.inputs));
+            if (val == null) return;
+            setText(r.result[0], val.toFixed(3) + ' mil');
+            setDisplay(`${p.id}-rev${suffix}-result-card`, true);
+        });
+    });
+}
+
+function initImpedanceCalculator() {
+    const modePanels = {};
+    Object.keys(PANELS).forEach((k) => { modePanels[k] = k + '-panel'; });
+
+    bindModeSwitch('.mode-btn[data-mode]', modePanels, (mode) => {
+        state.currentMode = mode;
+    });
+
+    // 各面板正算/反算
+    Object.keys(PANELS).forEach((key) => {
+        const p = PANELS[key];
+        bindPanel(p);
+        if (p.coplanar) bindPanel(p.coplanar);
+        if (p.asym) bindPanel(p.asym);
+    });
+
+    // 阻焊开关
+    createToggle('ss-solder-toggle', 'ssSolder', () => { if (state.currentMode === 'single-surface') click('calculate-ss'); });
+    createToggle('ds-solder-toggle', 'dsSolder', () => { if (state.currentMode === 'diff-surface') click('calculate-ds'); });
+
+    // 替代视图切换（共面/非对称）
+    const bindAltToggle = (toggleId, stateKey, prefix, altKey, labels) => {
+        const el = $(toggleId);
+        if (!el) return;
+        el.addEventListener('click', () => {
+            state[stateKey] = !state[stateKey];
+            const on = state[stateKey];
+            el.classList.toggle('on', on);
+            setText(toggleId, on ? labels[1] : labels[0]);
+            setDisplay(prefix + '-standard-svg', !on);
+            setDisplay(prefix + '-standard-inputs', !on);
+            setDisplay(prefix + '-' + altKey + '-svg', on);
+            setDisplay(prefix + '-' + altKey + '-inputs', on);
+            click('calculate-' + prefix);
+        });
+    };
+    bindAltToggle('ds-coplanar-toggle', 'dsCoplanar', 'ds', 'coplanar', ['标准', '共面']);
+    bindAltToggle('si-asym-toggle', 'siAsym', 'si', 'asym', ['对称', '非对称']);
+    bindAltToggle('di-asym-toggle', 'diAsym', 'di', 'asym', ['对称', '非对称']);
+
+    // SVG 数值实时同步
+    const svgLinks = [
+        ['ss-h', 'ss-h-value'], ['ss-w', 'ss-w-value'],
+        ['ds-h', 'ds-h-value'], ['ds-d', 'ds-d-value'], ['ds-w', ['ds-w1-value', 'ds-w2-value']],
+        ['si-h', 'si-h-value'], ['si-w', 'si-w-value'],
+        ['di-h', 'di-h-value'], ['di-d', 'di-d-value'], ['di-w', ['di-w1-value', 'di-w2-value']],
+        ['sia-h1', 'sia-h1-value'], ['sia-h2', 'sia-h2-value'], ['sia-w', 'sia-w-value'],
+        ['dia-h1', 'dia-h1-value'], ['dia-h2', 'dia-h2-value'], ['dia-d', 'dia-d-value'], ['dia-w', ['dia-w1-value', 'dia-w2-value']],
+        ['ss-h-rev', 'ss-h-value'],
+        ['ds-h-rev', 'ds-h-value'], ['ds-h-rev-d', 'ds-h-value'], ['ds-d-rev', 'ds-d-value'], ['ds-w-rev-d', ['ds-w1-value', 'ds-w2-value']],
+        ['si-h-rev', 'si-h-value'],
+        ['di-h-rev', 'di-h-value'], ['di-h-rev-d', 'di-h-value'], ['di-d-rev', 'di-d-value'], ['di-w-rev-d', ['di-w1-value', 'di-w2-value']],
+        ['sia-h1-rev', 'sia-h1-value'], ['sia-h2-rev', 'sia-h2-value'],
+        ['dia-h1-rev', 'dia-h1-value'], ['dia-h2-rev', 'dia-h2-value'], ['dia-h1-rev-d', 'dia-h1-value'], ['dia-h2-rev-d', 'dia-h2-value'], ['dia-d-rev', 'dia-d-value'], ['dia-w-rev-d', ['dia-w1-value', 'dia-w2-value']],
+    ];
+    svgLinks.forEach(([inputId, targets]) => liveSvg(inputId, targets));
+}
+
+(function() {
+    const page = document.getElementById('page3-3-2');
+    page.innerHTML = getImpedanceCalculatorHtml();
+    initImpedanceCalculator();
+})();
+</script>
+
+
+</body></html>
